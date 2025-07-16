@@ -1,0 +1,12 @@
+Flask
+Flask-Cors
+gunicorn
+yt-dlp
+youtube-transcript-api
+moviepy==1.0.3
+Pillow
+opencv-python-headless
+numpy
+openai-whisper
+sentence-transformers
+scikit-learn
