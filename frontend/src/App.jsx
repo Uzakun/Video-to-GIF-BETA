@@ -151,7 +151,7 @@ export default function App() {
                   value={youtubeUrl}
                   onChange={handleUrlChange}
                   className="input-field"
-                  placeholder="https://www.youtube.com/watch?v=6zr73ZeLK4I..."
+                  placeholder="http://youtube.com/watch?v=..."
                   required={inputType === 'url'}
                 />
               ) : (
