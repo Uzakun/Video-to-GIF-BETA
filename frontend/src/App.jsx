@@ -29,7 +29,7 @@ export default function App() {
     try {
       let response;
       if (inputType === 'url') {
-        response = await fetch('http://127.0.0.1:5000/api/generate-gifs', {
+        response = await fetch('/api/generate-gifs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -42,7 +42,7 @@ export default function App() {
         formData.append('prompt', prompt);
         formData.append('video', videoFile);
 
-        response = await fetch('http://127.0.0.1:5000/api/generate-gifs-from-upload', {
+        response = await fetch('/api/generate-gifs-from-upload', {
           method: 'POST',
           body: formData,
         });
