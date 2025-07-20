@@ -390,30 +390,55 @@ def generate_gifs_route():
     video_id = None
     video_path = None
     try:
-        # Extract video ID
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            video_id = info.get('id')
+        # Extract video ID with better error handling
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                video_id = info.get('id')
+                print(f"Extracted video ID: {video_id}")
+        except Exception as e:
+            print(f"Error extracting video ID: {str(e)}")
+            # Try manual extraction as fallback
+            if 'youtube.com/watch?v=' in youtube_url:
+                video_id = youtube_url.split('v=')[1].split('&')[0]
+            elif 'youtu.be/' in youtube_url:
+                video_id = youtube_url.split('/')[-1].split('?')[0]
+            else:
+                return jsonify({'error': 'Invalid YouTube URL format'}), 400
+        
+        if not video_id:
+            return jsonify({'error': 'Could not extract video ID from URL'}), 400
         
         # Use fallback download method
+        print(f"Attempting to download video ID: {video_id}")
         video_path = download_youtube_fallback(youtube_url, video_id)
         
         if not video_path or not os.path.exists(video_path):
-            return jsonify({
-                'error': 'Failed to download video. YouTube blocks data center IPs. Please use the file upload option instead, or try again later.'
-            }), 400
+            # Provide more specific error message
+            error_msg = 'Failed to download video. '
+            if YOUTUBE_API_SERVICE['enabled']:
+                error_msg += 'The API service might be down or the video might be restricted. '
+            error_msg += 'Please try using the file upload option instead.'
+            return jsonify({'error': error_msg}), 400
         
+        print(f"Video downloaded successfully, processing GIFs...")
         gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id)
         if error:
             return jsonify({'error': error}), 400
             
         base_url = request.host_url
         gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
+        print(f"Successfully generated {len(gif_urls)} GIFs")
         return jsonify({'gifs': gif_urls})
-    except Exception:
-        traceback.print_exc()
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"!!! Critical error in generate_gifs_route: {str(e)}")
+        print(f"Full traceback:\n{error_trace}")
+        
+        # Return a more informative error for debugging
         return jsonify({
-            'error': 'Failed to process YouTube video. Please use the file upload option for more reliable results.'
+            'error': 'An internal server error occurred while processing your request.',
+            'details': str(e) if app.debug else None  # Only show details in debug mode
         }), 500
     finally:
         if video_path and os.path.exists(video_path):
