@@ -35,10 +35,15 @@ sentence_model = None
 # --- Proxy Configuration ---
 # You can use free proxy services or set up your own
 PROXY_URLS = [
-    # Add more proxy URLs as needed
-    # Format: 'http://username:password@proxy-server:port' or 'http://proxy-server:port'
-    # You can get free proxies from services like ProxyScrape, ProxyList, etc.
-    # Or use a paid service like Bright Data, Smartproxy, etc.
+    'http://156.228.182.211:3129',
+    'http://154.213.199.54:3129',
+    'http://156.228.125.15:3129',
+    'http://154.214.1.197:3129',
+    'http://156.228.89.194:3129',
+    'http://156.242.43.50:3129',
+    'http://156.228.171.160:3129',
+
+    
 ]
 
 # --- Alternative: Use a YouTube downloader API service ---
