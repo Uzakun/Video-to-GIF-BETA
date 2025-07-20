@@ -225,7 +225,15 @@ def download_youtube_with_api(youtube_url, video_id):
             print(f"API Response received, status: {data.get('status', 'unknown')}")
             
             # Check if the response has videos
-            if 'videos' in data and data['videos']:
+            videos_data = data.get('videos', {})
+            if isinstance(videos_data, dict) and 'items' in videos_data:
+                videos = videos_data['items']
+            elif isinstance(videos_data, list):
+                videos = videos_data
+            else:
+                videos = []
+            
+            if videos:
                 # Sort videos by quality and find best match <= 480p
                 videos = data['videos']
                 suitable_videos = [v for v in videos if v.get('height', 0) <= 480 and v.get('url')]
