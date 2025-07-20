@@ -44,9 +44,9 @@ PROXY_URLS = [
 # --- Alternative: Use a YouTube downloader API service ---
 # Services like RapidAPI offer YouTube downloader endpoints
 YOUTUBE_API_SERVICE = {
-    'enabled': True,  
+    'enabled': True,  # Set to True to use API service instead of direct yt-dlp
     'api_url': 'https://youtube-media-downloader.p.rapidapi.com/v2/video/details',
-    'api_key': '35026510f3msh35c1dd768d79849p137ccajsnca36f4120cdf',  
+    'api_key': '35026510f3msh35c1dd768d79849p137ccajsnca36f4120cdf',  # Your actual API key
     'api_host': 'youtube-media-downloader.p.rapidapi.com'
 }
 
@@ -214,37 +214,73 @@ def download_youtube_with_api(youtube_url, video_id):
             'X-RapidAPI-Host': YOUTUBE_API_SERVICE['api_host']
         }
         
+        # This API expects videoId parameter
         params = {'videoId': video_id}
         
+        print(f"Calling API with video ID: {video_id}")
         response = requests.get(YOUTUBE_API_SERVICE['api_url'], headers=headers, params=params)
         
         if response.status_code == 200:
             data = response.json()
+            print(f"API Response received, status: {data.get('status', 'unknown')}")
             
-            # Find best video format (480p or lower)
-            video_formats = data.get('videos', [])
-            best_format = None
-            
-            for fmt in video_formats:
-                if fmt.get('height', 0) <= 480 and fmt.get('extension') == 'mp4':
-                    best_format = fmt
-                    break
-            
-            if best_format:
-                video_url = best_format.get('url')
-                video_path = os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+            # Check if the response has videos
+            if 'videos' in data and data['videos']:
+                # Sort videos by quality and find best match <= 480p
+                videos = data['videos']
+                suitable_videos = [v for v in videos if v.get('height', 0) <= 480 and v.get('url')]
                 
-                # Download the video
-                video_response = requests.get(video_url, stream=True)
-                with open(video_path, 'wb') as f:
-                    for chunk in video_response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                if not suitable_videos:
+                    # If no 480p or lower, just take the lowest quality available
+                    suitable_videos = [v for v in videos if v.get('url')]
                 
-                return video_path
+                if suitable_videos:
+                    # Sort by height to get the best quality within our limit
+                    suitable_videos.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    selected_video = suitable_videos[0]
+                    
+                    video_url = selected_video['url']
+                    video_path = os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+                    
+                    print(f"Downloading video: {selected_video.get('height', 'unknown')}p quality")
+                    
+                    # Download with timeout and better error handling
+                    video_response = requests.get(video_url, stream=True, timeout=120)
+                    video_response.raise_for_status()
+                    
+                    total_size = int(video_response.headers.get('content-length', 0))
+                    downloaded = 0
+                    
+                    with open(video_path, 'wb') as f:
+                        for chunk in video_response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    progress = (downloaded / total_size) * 100
+                                    if int(progress) % 10 == 0:  # Print every 10%
+                                        print(f"Download progress: {int(progress)}%")
+                    
+                    print(f"Video downloaded successfully to {video_path}")
+                    return video_path
+                else:
+                    print("No suitable video formats found in API response")
+            else:
+                print(f"API response missing videos. Response: {json.dumps(data, indent=2)[:500]}")
+        else:
+            error_msg = response.text[:200] if response.text else "No error message"
+            print(f"API request failed with status {response.status_code}: {error_msg}")
         
         return None
+    except requests.exceptions.Timeout:
+        print("API request timed out")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Network error during API request: {str(e)}")
+        return None
     except Exception as e:
-        print(f"API download failed: {e}")
+        print(f"API download failed: {str(e)}")
+        traceback.print_exc()
         return None
 
 def download_youtube_with_proxy(youtube_url, video_id):
