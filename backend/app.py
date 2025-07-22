@@ -4,28 +4,36 @@ import os
 import traceback
 import yt_dlp
 import numpy as np
+import whisper
 import random
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from moviepy.editor import VideoFileClip
+from youtube_transcript_api import YouTubeTranscriptApi
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 import uuid
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import gc
-import replicate # The Replicate library
 
 app = Flask(__name__)
 CORS(app)
 
 # --- Configuration ---
-TEMP_VIDEO_FOLDER = 'static/temp_videos' # Needs to be in static to be publicly accessible
+TEMP_VIDEO_FOLDER = 'temp_videos'
 GIF_OUTPUT_FOLDER = 'static/gifs'
+app.config['UPLOAD_FOLDER'] = TEMP_VIDEO_FOLDER
 
-# --- AI Models ---
-# The heavy Whisper model is removed. We only keep the lightweight SentenceTransformer.
+# --- Global Model Variables (will be loaded on first use) ---
+whisper_model = None
 sentence_model = None
+
+# --- Proxy Configuration ---
+PROXY_URLS = [
+    # To improve YouTube downloads, you can add paid residential proxy URLs here
+    # Format: 'http://username:password@proxy-server:port'
+]
 
 # --- Ensure Folders Exist ---
 if not os.path.exists(TEMP_VIDEO_FOLDER):
@@ -33,7 +41,15 @@ if not os.path.exists(TEMP_VIDEO_FOLDER):
 if not os.path.exists(GIF_OUTPUT_FOLDER):
     os.makedirs(GIF_OUTPUT_FOLDER)
 
-# --- Helper Functions ---
+# --- Helper Functions for Lazy Model Loading ---
+def get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        print("Loading Whisper model (tiny.en)...")
+        # Using tiny.en for lower memory usage on a 1 CPU core VPS
+        whisper_model = whisper.load_model("tiny.en")
+        print("Whisper model loaded.")
+    return whisper_model
 
 def get_sentence_model():
     global sentence_model
@@ -43,34 +59,38 @@ def get_sentence_model():
         print("Sentence Transformer model loaded.")
     return sentence_model
 
-def get_transcript_from_replicate(public_video_url):
-    """
-    Calls the Replicate API to get a transcript from a public video URL.
-    """
+def get_existing_transcript(video_id):
     try:
-        print(f"Calling Replicate Whisper API for URL: {public_video_url}")
-        # This is a popular, efficient Whisper model on Replicate
-        output = replicate.run(
-            "vaibhavs10/incredibly-fast-whisper:3ab86df6c8f54c11309d4d1f930ac292bad43ace52d10c80d87c558621c89ec3",
-            input={"audio": public_video_url, "language": "en"}
-        )
-        print("Received response from Replicate.")
-        
-        # Reformat the output to match what the rest of our code expects
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript = transcript_list.find_transcript(['en'])
+        return transcript.fetch()
+    except Exception:
+        return None
+
+def generate_transcript_with_whisper(video_path):
+    try:
+        print("Generating transcript with Whisper...")
+        model = get_whisper_model()
+        result = model.transcribe(video_path, fp16=False)
+        print("Whisper transcription complete.")
         formatted_transcript = []
-        for segment in output["segments"]:
-             formatted_transcript.append({
+        for segment in result["segments"]:
+            formatted_transcript.append({
                 'text': segment['text'],
                 'start': segment['start'],
                 'duration': segment['end'] - segment['start']
             })
+        # Don't delete the globally loaded model, just clear GPU cache if possible
+        # import torch
+        # torch.cuda.empty_cache()
+        gc.collect()
         return formatted_transcript
     except Exception as e:
-        print(f"!!! Replicate API failed: {e}")
+        print(f"!!! Whisper transcription failed: {e}")
+        traceback.print_exc()
         return None
 
 def find_relevant_segments(transcript, prompt, count=3):
-    # This function is fast and lightweight, so we keep it on our server.
     try:
         print("Performing local smart search...")
         segment_texts = [s['text'] for s in transcript]
@@ -80,16 +100,21 @@ def find_relevant_segments(transcript, prompt, count=3):
         segment_embeddings = s_model.encode(segment_texts)
         
         similarities = cosine_similarity(prompt_embedding, segment_embeddings)[0]
+        
         scored_segments = sorted(zip(transcript, similarities), key=lambda x: x[1], reverse=True)
         
         candidate_pool = [segment for segment, score in scored_segments[:20]]
         
         if not candidate_pool:
+            print("Smart search found no matches, falling back to random segments.")
             return random.sample(transcript, min(len(transcript), count))
-            
+
+        print(f"Found {len(candidate_pool)} potential segments. Randomly selecting {count}.")
+        gc.collect()
         return random.sample(candidate_pool, min(len(candidate_pool), count))
+
     except Exception as e:
-        print(f"!!! Local smart search failed: {e}. Falling back.")
+        print(f"!!! Local smart search failed: {e}. Falling back to random segments.")
         return random.sample(transcript, min(len(transcript), count))
 
 
@@ -122,47 +147,82 @@ def add_text_to_frame(frame, text):
         print(f"!!! Error adding text to frame: {e}")
         return frame
 
-
 def create_gif_from_segment(video_path, segment, output_filename):
     start_time, duration, text = segment['start'], segment['duration'], segment['text']
     end_time = start_time + min(duration, 5)
     
+    video_clip = None
     try:
-        with VideoFileClip(video_path).subclip(start_time, end_time) as video_clip:
-            frames = [add_text_to_frame(video_clip.get_frame(t), text) for t in np.arange(0, video_clip.duration, 1/10)]
-            if frames:
-                pil_frames = [Image.fromarray(f) for f in frames]
-                pil_frames[0].save(output_filename, save_all=True, append_images=pil_frames[1:], duration=100, loop=0)
-                return output_filename
+        video_clip = VideoFileClip(video_path).subclip(start_time, end_time)
+        frames = [add_text_to_frame(video_clip.get_frame(t), text) for t in np.arange(0, video_clip.duration, 1/10)]
+        
+        if frames:
+            pil_frames = [Image.fromarray(f) for f in frames]
+            pil_frames[0].save(output_filename, save_all=True, append_images=pil_frames[1:], duration=100, loop=0, optimize=True)
+            return output_filename
         return None
     except Exception:
         traceback.print_exc()
         return None
+    finally:
+        if video_clip:
+            video_clip.close()
+        gc.collect()
 
-
-def process_video_and_generate_gifs(video_path, prompt):
-    # --- MODIFIED LOGIC ---
-    # 1. Create a public URL for the uploaded video
-    base_url = request.host_url
-    video_filename = os.path.basename(video_path)
-    public_video_url = f"{base_url}static/temp_videos/{video_filename}"
+def download_youtube_fallback(youtube_url, video_id):
+    """Try multiple methods to download YouTube video"""
+    # Method 1: Try with proxies first
+    if PROXY_URLS:
+        for proxy in PROXY_URLS:
+            try:
+                print(f"Trying proxy...")
+                ydl_opts = {
+                    'format': 'bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]',
+                    'outtmpl': os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.%(ext)s"),
+                    'merge_output_format': 'mp4',
+                    'proxy': proxy,
+                    'socket_timeout': 30,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([youtube_url])
+                    return os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+            except Exception as e:
+                print(f"Proxy failed: {e}")
+                continue
     
-    # 2. Offload the heavy transcription to Replicate
-    transcript = get_transcript_from_replicate(public_video_url)
+    # Method 2: Try direct download as a final fallback
+    try:
+        print("Trying direct download as a fallback...")
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]',
+            'outtmpl': os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.%(ext)s"),
+            'merge_output_format': 'mp4',
+            'socket_timeout': 30,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+            return os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+    except Exception as e:
+        print(f"Direct download failed: {e}")
+    
+    return None
+
+def process_video_and_generate_gifs(video_path, prompt, video_id):
+    transcript = get_existing_transcript(video_id) if video_id else None
+    if not transcript:
+        transcript = generate_transcript_with_whisper(video_path)
 
     if not transcript:
         if os.path.exists(video_path): os.remove(video_path)
-        return None, "Could not generate a transcript using the AI service."
+        return None, "Could not get or generate a transcript for this video."
 
-    # 3. Find segments locally (this is fast)
     segments = find_relevant_segments(transcript, prompt, count=3)
     if not segments:
         if os.path.exists(video_path): os.remove(video_path)
         return None, "No relevant segments found for that prompt."
 
-    # 4. Create GIFs locally (this is fast)
     gif_paths = []
-    output_prefix = f"upload_{uuid.uuid4().hex[:6]}"
+    output_prefix = video_id if video_id else f"upload_{uuid.uuid4().hex[:6]}"
     for i, segment in enumerate(segments):
         unique_id = uuid.uuid4().hex[:8]
         output_filename = os.path.join(GIF_OUTPUT_FOLDER, f"{output_prefix}_{i}_{unique_id}.gif")
@@ -171,19 +231,59 @@ def process_video_and_generate_gifs(video_path, prompt):
         if gif_path:
             gif_paths.append(gif_path)
             
-    # 5. Clean up the temporary video file
-    if os.path.exists(video_path): os.remove(video_path)
+    if os.path.exists(video_path): 
+        try:
+            os.remove(video_path)
+        except Exception as e:
+            print(f"Error removing video file {video_path}: {e}")
+    
+    gc.collect()
     return gif_paths, None
-
-# --- Flask Routes ---
 
 @app.route('/api/generate-gifs', methods=['POST'])
 def generate_gifs_route():
-    # To use this route, you would need a similar flow: 
-    # 1. Get the public video URL from yt-dlp
-    # 2. Send that public URL to get_transcript_from_replicate
-    # 3. Proceed as normal.
-    return jsonify({'error': 'YouTube URL processing is not yet implemented in this version.'}), 400
+    data = request.get_json()
+    prompt, youtube_url = data.get('prompt'), data.get('youtube_url')
+    if not prompt or not youtube_url:
+        return jsonify({'error': 'Prompt and YouTube URL are required.'}), 400
+    
+    video_id = None
+    video_path = None
+    try:
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                video_id = info.get('id')
+                print(f"Extracted video ID: {video_id}")
+        except Exception as e:
+            print(f"Could not extract video ID with yt-dlp: {str(e)}")
+            return jsonify({'error': 'Invalid YouTube URL or video is unavailable.'}), 400
+        
+        if not video_id:
+            return jsonify({'error': 'Could not extract video ID from URL'}), 400
+        
+        video_path = download_youtube_fallback(youtube_url, video_id)
+        
+        if not video_path or not os.path.exists(video_path):
+            return jsonify({'error': 'Failed to download video. It might be private or region-locked. Try the file upload option.'}), 400
+        
+        gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id)
+        if error:
+            return jsonify({'error': error}), 400
+            
+        base_url = request.host_url
+        gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
+        return jsonify({'gifs': gif_urls})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': 'A critical server error occurred.'}), 500
+    finally:
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as e:
+                print(f"Error removing temp video file {video_path}: {e}")
+        gc.collect()
 
 @app.route('/api/generate-gifs-from-upload', methods=['POST'])
 def generate_gifs_from_upload_route():
@@ -198,11 +298,10 @@ def generate_gifs_from_upload_route():
     try:
         if file:
             filename = f"upload_{uuid.uuid4().hex}.mp4"
-            # The temp video MUST be in a publicly accessible folder
-            video_path = os.path.join(TEMP_VIDEO_FOLDER, filename)
+            video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(video_path)
             
-            gif_paths, error = process_video_and_generate_gifs(video_path, prompt)
+            gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id=None)
             
             if error:
                 return jsonify({'error': error}), 400
@@ -212,19 +311,16 @@ def generate_gifs_from_upload_route():
             return jsonify({'gifs': gif_urls})
     except Exception as e:
         traceback.print_exc()
-        if video_path and os.path.exists(video_path): os.remove(video_path)
-        return jsonify({'error': 'A critical server error occurred.'}), 500
-    
+        return jsonify({'error': 'An error occurred during upload processing.'}), 500
+    finally:
+         if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as e:
+                print(f"Error removing temp video file {video_path}: {e}")
+        
     return jsonify({'error': 'An unknown error occurred during upload.'}), 500
-
-# Add a route to serve the temporary videos
-@app.route('/static/temp_videos/<filename>')
-def serve_temp_video(filename):
-    return send_from_directory(TEMP_VIDEO_FOLDER, filename)
 
 @app.route('/static/gifs/<filename>')
 def serve_gif(filename):
     return send_from_directory(GIF_OUTPUT_FOLDER, filename)
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
