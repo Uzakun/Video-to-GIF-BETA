@@ -10,3 +10,4 @@ numpy
 openai-whisper
 sentence-transformers
 scikit-learn
+replicate
