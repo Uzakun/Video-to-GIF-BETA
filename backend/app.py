@@ -112,21 +112,29 @@ def add_text_to_frame(frame, text):
     try:
         pil_image = Image.fromarray(frame)
         draw = ImageDraw.Draw(pil_image)
-        font_size = 48
+        # --- MODIFIED: Increased font size ---
+        font_size = 60
         try:
             font = ImageFont.truetype("arialbd.ttf", font_size)
         except IOError:
             font = ImageFont.load_default()
+
         img_width, img_height = pil_image.size
-        wrapped_text = textwrap.fill(text, width=int(img_width / 22))
+        # --- MODIFIED: Adjusted text wrap for larger font ---
+        wrapped_text = textwrap.fill(text, width=int(img_width / 28))
+
         bbox = draw.textbbox((0, 0), wrapped_text, font=font)
         text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
         x, y = (img_width - text_width) / 2, img_height - text_height - 40
+
+        # This part creates the black outline
         outline_range = 3
         for dx in range(-outline_range, outline_range + 1):
             for dy in range(-outline_range, outline_range + 1):
                 if dx != 0 or dy != 0:
                     draw.text((x + dx, y + dy), wrapped_text, font=font, fill="black")
+
+        # This part draws the white text on top
         draw.text((x, y), wrapped_text, font=font, fill="white")
         return np.array(pil_image)
     except Exception:
