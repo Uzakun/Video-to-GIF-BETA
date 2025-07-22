@@ -31,7 +31,7 @@ sentence_model = None
 
 # --- Proxy Configuration ---
 PROXY_URLS = [
-    'http://brd-customer-hl_9555f995-zone-residential_proxy1:xjd7xb637zjl@brd.superproxy.io:33335'
+    'brd-customer-hl_9555f995-zone-residential_proxy1:xjd7xb637zjl@brd.superproxy.io:33335'
 ]
 
 # --- Ensure Folders Exist ---
