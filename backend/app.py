@@ -181,6 +181,7 @@ def download_youtube_fallback(youtube_url, video_id):
                     'merge_output_format': 'mp4',
                     'proxy': proxy,
                     'socket_timeout': 30,
+                    'nocheckcertificate': True,
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([youtube_url])
@@ -197,6 +198,7 @@ def download_youtube_fallback(youtube_url, video_id):
             'outtmpl': os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.%(ext)s"),
             'merge_output_format': 'mp4',
             'socket_timeout': 30,
+            'nocheckcertificate': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([youtube_url])
