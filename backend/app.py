@@ -30,7 +30,7 @@ RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY") # Gets key from server environment
 # --- Proxy Configuration ---
 PROXY_URLS = [
     # Add your Bright Data (or other) residential proxy URL here
-    'http://brd-customer-hl_9555f995-zone-residential_proxy1-country-us:xjd7xb637zjl@brd.superproxy.io:33335'
+    'http://brd-customer-hl_9555f995-zone-residential_proxy1:xjd7xb637zjl@brd.superproxy.io:33335'
 ]
 
 # --- AI Models (Lazy Loading) ---
@@ -175,7 +175,7 @@ def process_video_and_generate_gifs(video_path, prompt, video_id=None):
         os.remove(video_path)
     return gif_paths, None
 
-# --- NEW DOWNLOAD FUNCTIONS ---
+# --- DOWNLOAD FUNCTIONS ---
 
 def download_youtube_via_api(youtube_url, video_id):
     if not RAPIDAPI_KEY:
@@ -234,13 +234,10 @@ def download_youtube_directly(youtube_url, video_id):
     return None
 
 def download_youtube_fallback(youtube_url, video_id):
-    # Method 1: API
     video_path = download_youtube_via_api(youtube_url, video_id)
     if video_path and os.path.exists(video_path): return video_path
-    # Method 2: Proxies
     video_path = download_youtube_with_proxy(youtube_url, video_id)
     if video_path and os.path.exists(video_path): return video_path
-    # Method 3: Direct
     video_path = download_youtube_directly(youtube_url, video_id)
     if video_path and os.path.exists(video_path): return video_path
     return None
@@ -272,9 +269,9 @@ def generate_gifs_route():
         base_url = request.host_url
         gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
         return jsonify({'gifs': gif_urls})
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return jsonify({'error': 'A critical server error occurred.'}), 500
+        return jsonify({'error': f'A critical server error occurred: {e}'}), 500
     finally:
         if video_path and os.path.exists(video_path):
             os.remove(video_path)
