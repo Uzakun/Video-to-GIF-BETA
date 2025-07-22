@@ -31,8 +31,7 @@ sentence_model = None
 
 # --- Proxy Configuration ---
 PROXY_URLS = [
-    # To improve YouTube downloads, you can add paid residential proxy URLs here
-    # Format: 'http://username:password@proxy-server:port'
+    'http://brd-customer-hl_9555f995-zone-residential_proxy1:xjd7xb637zjl@brd.superproxy.io:33335'
 ]
 
 # --- Ensure Folders Exist ---
