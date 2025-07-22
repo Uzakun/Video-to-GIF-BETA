@@ -2,6 +2,7 @@
 
 import os
 import traceback
+import yt_dlp
 import numpy as np
 import whisper
 import random
@@ -15,10 +16,6 @@ import uuid
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import gc
-# New imports for the official YouTube API
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-import requests
 
 app = Flask(__name__)
 CORS(app)
@@ -32,6 +29,11 @@ app.config['UPLOAD_FOLDER'] = TEMP_VIDEO_FOLDER
 whisper_model = None
 sentence_model = None
 
+# --- Proxy Configuration ---
+PROXY_URLS = [
+    'http://brd-customer-hl_9555f995-zone-residential_proxy1-country-us:xjd7xb637zjl@brd.superproxy.io:33335'
+]
+
 # --- Ensure Folders Exist ---
 if not os.path.exists(TEMP_VIDEO_FOLDER):
     os.makedirs(TEMP_VIDEO_FOLDER)
@@ -43,6 +45,7 @@ def get_whisper_model():
     global whisper_model
     if whisper_model is None:
         print("Loading Whisper model (tiny.en)...")
+        # Using tiny.en for lower memory usage on a 1 CPU core VPS
         whisper_model = whisper.load_model("tiny.en")
         print("Whisper model loaded.")
     return whisper_model
@@ -55,56 +58,6 @@ def get_sentence_model():
         print("Sentence Transformer model loaded.")
     return sentence_model
 
-# --- Official YouTube API Functions ---
-def get_video_details(video_id):
-    """Fetches details for a given YouTube video ID using the YouTube Data API."""
-    api_key = os.environ.get('YOUTUBE_API_KEY')
-    if not api_key:
-        print("ERROR: YOUTUBE_API_KEY environment variable not set.")
-        return None, "Server is not configured with a YouTube API Key."
-
-    try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.videos().list(
-            part="snippet,contentDetails,status",
-            id=video_id
-        )
-        response = request.execute()
-
-        if not response.get('items'):
-            return None, "Video not found or is private."
-        
-        video_item = response['items'][0]
-
-        # Check for region locks or embeddability issues
-        if video_item['status'].get('uploadStatus') != 'processed':
-            return None, "Video is still processing or has been deleted."
-        if not video_item['status'].get('embeddable'):
-            return None, "This video is not embeddable and cannot be processed."
-
-        return video_item, None
-    except HttpError as e:
-        print(f"An HTTP error {e.resp.status} occurred: {e.content}")
-        return None, f"An API error occurred: {e.resp.status}"
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None, "An unexpected server error occurred while fetching video details."
-
-def download_video_from_url(url, output_path):
-    """Downloads a video from a direct URL."""
-    try:
-        response = requests.get(url, stream=True, timeout=60)
-        response.raise_for_status()  # Will raise an HTTPError for bad responses
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        print(f"Video downloaded successfully to {output_path}")
-        return output_path
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to download video from URL: {e}")
-        return None
-
-# --- Core Processing Functions ---
 def get_existing_transcript(video_id):
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -119,7 +72,16 @@ def generate_transcript_with_whisper(video_path):
         model = get_whisper_model()
         result = model.transcribe(video_path, fp16=False)
         print("Whisper transcription complete.")
-        formatted_transcript = [{'text': seg['text'], 'start': seg['start'], 'duration': seg['end'] - seg['start']} for seg in result["segments"]]
+        formatted_transcript = []
+        for segment in result["segments"]:
+            formatted_transcript.append({
+                'text': segment['text'],
+                'start': segment['start'],
+                'duration': segment['end'] - segment['start']
+            })
+        # Don't delete the globally loaded model, just clear GPU cache if possible
+        # import torch
+        # torch.cuda.empty_cache()
         gc.collect()
         return formatted_transcript
     except Exception as e:
@@ -131,46 +93,53 @@ def find_relevant_segments(transcript, prompt, count=3):
     try:
         print("Performing local smart search...")
         segment_texts = [s['text'] for s in transcript]
+        
         s_model = get_sentence_model()
         prompt_embedding = s_model.encode([prompt])
         segment_embeddings = s_model.encode(segment_texts)
+        
         similarities = cosine_similarity(prompt_embedding, segment_embeddings)[0]
         
-        # Select the top 20 candidates and then randomly sample from them
         scored_segments = sorted(zip(transcript, similarities), key=lambda x: x[1], reverse=True)
-        candidate_pool = [segment for segment, score in scored_segments[:20]]
-
-        if not candidate_pool:
-            return random.sample(transcript, min(len(transcript), count))
         
+        candidate_pool = [segment for segment, score in scored_segments[:20]]
+        
+        if not candidate_pool:
+            print("Smart search found no matches, falling back to random segments.")
+            return random.sample(transcript, min(len(transcript), count))
+
+        print(f"Found {len(candidate_pool)} potential segments. Randomly selecting {count}.")
         gc.collect()
         return random.sample(candidate_pool, min(len(candidate_pool), count))
+
     except Exception as e:
         print(f"!!! Local smart search failed: {e}. Falling back to random segments.")
         return random.sample(transcript, min(len(transcript), count))
+
 
 def add_text_to_frame(frame, text):
     try:
         pil_image = Image.fromarray(frame)
         draw = ImageDraw.Draw(pil_image)
+        font_size = 48
         try:
-            font = ImageFont.truetype("arialbd.ttf", 48)
+            font = ImageFont.truetype("arialbd.ttf", font_size)
         except IOError:
             font = ImageFont.load_default()
 
         img_width, img_height = pil_image.size
         wrapped_text = textwrap.fill(text, width=int(img_width / 22))
-        
+
         bbox = draw.textbbox((0, 0), wrapped_text, font=font)
         text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
         x, y = (img_width - text_width) / 2, img_height - text_height - 40
 
-        # Create a black outline
-        for dx in range(-3, 4):
-            for dy in range(-3, 4):
+        outline_range = 3
+        for dx in range(-outline_range, outline_range + 1):
+            for dy in range(-outline_range, outline_range + 1):
                 if dx != 0 or dy != 0:
                     draw.text((x + dx, y + dy), wrapped_text, font=font, fill="black")
-        
+
         draw.text((x, y), wrapped_text, font=font, fill="white")
         return np.array(pil_image)
     except Exception as e:
@@ -179,11 +148,13 @@ def add_text_to_frame(frame, text):
 
 def create_gif_from_segment(video_path, segment, output_filename):
     start_time, duration, text = segment['start'], segment['duration'], segment['text']
-    end_time = start_time + min(duration, 5) # GIFs max 5 seconds
+    end_time = start_time + min(duration, 5)
+    
     video_clip = None
     try:
         video_clip = VideoFileClip(video_path).subclip(start_time, end_time)
         frames = [add_text_to_frame(video_clip.get_frame(t), text) for t in np.arange(0, video_clip.duration, 1/10)]
+        
         if frames:
             pil_frames = [Image.fromarray(f) for f in frames]
             pil_frames[0].save(output_filename, save_all=True, append_images=pil_frames[1:], duration=100, loop=0, optimize=True)
@@ -196,6 +167,46 @@ def create_gif_from_segment(video_path, segment, output_filename):
         if video_clip:
             video_clip.close()
         gc.collect()
+
+def download_youtube_fallback(youtube_url, video_id):
+    """Try multiple methods to download YouTube video"""
+    # Method 1: Try with proxies first
+    if PROXY_URLS:
+        for proxy in PROXY_URLS:
+            try:
+                print(f"Trying proxy...")
+                ydl_opts = {
+                    'format': 'bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]',
+                    'outtmpl': os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.%(ext)s"),
+                    'merge_output_format': 'mp4',
+                    'proxy': proxy,
+                    'socket_timeout': 30,
+                    'nocheckcertificate': True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([youtube_url])
+                    return os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+            except Exception as e:
+                print(f"Proxy failed: {e}")
+                continue
+    
+    # Method 2: Try direct download as a final fallback
+    try:
+        print("Trying direct download as a fallback...")
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]',
+            'outtmpl': os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.%(ext)s"),
+            'merge_output_format': 'mp4',
+            'socket_timeout': 30,
+            'nocheckcertificate': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+            return os.path.join(TEMP_VIDEO_FOLDER, f"{video_id}.mp4")
+    except Exception as e:
+        print(f"Direct download failed: {e}")
+    
+    return None
 
 def process_video_and_generate_gifs(video_path, prompt, video_id):
     transcript = get_existing_transcript(video_id) if video_id else None
@@ -216,6 +227,7 @@ def process_video_and_generate_gifs(video_path, prompt, video_id):
     for i, segment in enumerate(segments):
         unique_id = uuid.uuid4().hex[:8]
         output_filename = os.path.join(GIF_OUTPUT_FOLDER, f"{output_prefix}_{i}_{unique_id}.gif")
+        
         gif_path = create_gif_from_segment(video_path, segment, output_filename)
         if gif_path:
             gif_paths.append(gif_path)
@@ -229,7 +241,6 @@ def process_video_and_generate_gifs(video_path, prompt, video_id):
     gc.collect()
     return gif_paths, None
 
-# --- API Routes ---
 @app.route('/api/generate-gifs', methods=['POST'])
 def generate_gifs_route():
     data = request.get_json()
@@ -237,46 +248,26 @@ def generate_gifs_route():
     if not prompt or not youtube_url:
         return jsonify({'error': 'Prompt and YouTube URL are required.'}), 400
     
+    video_id = None
     video_path = None
     try:
-        # Step 1: Extract video ID from URL
-        video_id = None
-        if "youtube.com/watch?v=" in youtube_url:
-            video_id = youtube_url.split("v=")[1].split("&")[0]
-        elif "youtu.be/" in youtube_url:
-            video_id = youtube_url.split("youtu.be/")[1].split("?")[0]
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                video_id = info.get('id')
+                print(f"Extracted video ID: {video_id}")
+        except Exception as e:
+            print(f"Could not extract video ID with yt-dlp: {str(e)}")
+            return jsonify({'error': 'Invalid YouTube URL or video is unavailable.'}), 400
         
         if not video_id:
-            return jsonify({'error': 'Invalid YouTube URL. Could not extract video ID.'}), 400
-        print(f"Extracted video ID: {video_id}")
-
-        # Step 2: Use YouTube Data API to get video details
-        details, error = get_video_details(video_id)
-        if error:
-            return jsonify({'error': error}), 400
+            return jsonify({'error': 'Could not extract video ID from URL'}), 400
         
-        # Step 3: Use yt-dlp to get the direct download URL (not for downloading)
-        # This is a reliable way to get a streamable URL without downloading directly
-        download_url = None
-        try:
-            ydl_opts = {'format': 'best[ext=mp4][height<=480]', 'quiet': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-                download_url = info.get('url')
-        except Exception as e:
-            print(f"yt-dlp failed to get direct URL: {e}")
-            return jsonify({'error': 'Could not retrieve video download link.'}), 400
-
-        if not download_url:
-             return jsonify({'error': 'Failed to get a downloadable link for the video.'}), 400
-
-        # Step 4: Download the video from the direct URL
-        filename = f"{video_id}.mp4"
-        video_path = os.path.join(TEMP_VIDEO_FOLDER, filename)
-        if not download_video_from_url(download_url, video_path):
-            return jsonify({'error': 'Failed to download video from the retrieved link.'}), 500
+        video_path = download_youtube_fallback(youtube_url, video_id)
         
-        # Step 5: Process the downloaded video to create GIFs
+        if not video_path or not os.path.exists(video_path):
+            return jsonify({'error': 'Failed to download video. It might be private or region-locked. Try the file upload option.'}), 400
+        
         gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id)
         if error:
             return jsonify({'error': error}), 400
@@ -284,12 +275,10 @@ def generate_gifs_route():
         base_url = request.host_url
         gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
         return jsonify({'gifs': gif_urls})
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': 'A critical server error occurred.'}), 500
     finally:
-        # Final cleanup of temp video file
         if video_path and os.path.exists(video_path):
             try:
                 os.remove(video_path)
@@ -308,32 +297,31 @@ def generate_gifs_from_upload_route():
 
     video_path = None
     try:
-        filename = f"upload_{uuid.uuid4().hex}.mp4"
-        video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(video_path)
-        
-        gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id=None)
-        
-        if error:
-            return jsonify({'error': error}), 400
+        if file:
+            filename = f"upload_{uuid.uuid4().hex}.mp4"
+            video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(video_path)
             
-        base_url = request.host_url
-        gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
-        return jsonify({'gifs': gif_urls})
+            gif_paths, error = process_video_and_generate_gifs(video_path, prompt, video_id=None)
+            
+            if error:
+                return jsonify({'error': error}), 400
+                
+            base_url = request.host_url
+            gif_urls = [f"{base_url}static/gifs/{os.path.basename(path)}" for path in gif_paths]
+            return jsonify({'gifs': gif_urls})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': 'An error occurred during upload processing.'}), 500
     finally:
-       if video_path and os.path.exists(video_path):
-           try:
-               os.remove(video_path)
-           except Exception as e:
-               print(f"Error removing temp video file {video_path}: {e}")
-       gc.collect()
+         if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as e:
+                print(f"Error removing temp video file {video_path}: {e}")
+        
+    return jsonify({'error': 'An unknown error occurred during upload.'}), 500
 
 @app.route('/static/gifs/<filename>')
 def serve_gif(filename):
     return send_from_directory(GIF_OUTPUT_FOLDER, filename)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
